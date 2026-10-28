@@ -9,7 +9,8 @@ Fine-tune Liquid's image decision models with a standalone script for each model
 
 Both scripts load the same Hugging Face dataset format, render Liquid's native
 decision prompts, and use TRL for image batching and completion-only loss on the
-answer code plus EOS. Each script works independently and supports both datasets.
+answer code plus EOS. Each script works independently with datasets matching the
+format below.
 
 d1-2B uses LFM3 with bidirectional global attention over each decision prompt. A small
 `SFTTrainer` subclass applies the model's native attention mask while keeping
@@ -17,14 +18,15 @@ the answer hidden from the prompt. LoRA trains the language model, including
 its attention gates. d1-3B uses the standard causal `SFTTrainer`. Both keep the
 vision encoder frozen.
 
-## Datasets
+## Dataset
 
-Both datasets have the same five columns:
+Both scripts default to [Mind2Web](https://huggingface.co/datasets/chrislevy/mind2web-decisions).
 
 | Dataset | Train | Validation | Test |
 | --- | ---: | ---: | --- |
-| [Image segment decisions](https://huggingface.co/datasets/chrislevy/image-segment-decisions) | 9,969 | 997 | 3,000 |
 | [Mind2Web](https://huggingface.co/datasets/chrislevy/mind2web-decisions) | 4,574 | 512 | task: 833; website: 634; domain: 2,690 |
+
+The dataset format has five columns:
 
 ```python
 Features({
@@ -38,8 +40,8 @@ Features({
 
 - `images`: ordered list of embedded PNGs, decoded to PIL images when loaded.
   Every current example has one image; the format supports multiple images.
-- `state`: optional context as a JSON object. Image segment decisions use `{}`; Mind2Web
-  includes the task, past actions, and original screenshot dimensions.
+- `state`: optional context as a JSON object. Mind2Web includes the task, past
+  actions, and original screenshot dimensions; `{}` is valid when no context is needed.
 - `question`: `{"type": "choice", "instructions": "...", "criteria": {"option_key": "description", ...}}`.
   Candidate keys and descriptions can differ between examples.
 - `label`: the correct key in that example's `question.criteria`.
@@ -49,11 +51,10 @@ The `Json` feature preserves variable object keys and their order. Use the pinne
 `datasets==4.8.4` version; the Modal image already includes it. The trainer requires
 `train` and `validation` splits. Test splits are reserved for evaluation.
 
-Image segment decisions use images and segment descriptions, with the assigned
-segment as the target. Mind2Web asks which candidate element to select; bounding
+Mind2Web asks which candidate element to select; bounding
 boxes use original screenshot coordinates, with those dimensions supplied in state.
 
-The dataset cards include example payloads and streaming snippets.
+The dataset card includes an example payload and a streaming snippet.
 Images are stored inside the dataset, so training needs
 no backup ZIP, image URLs, or separate dataset upload to Modal.
 
@@ -86,14 +87,15 @@ uv run modal run --detach src/decision_model/liquid_d1_2b_image_finetune.py
 uv run modal run --detach src/decision_model/liquid_d1_3b_image_finetune.py
 ```
 
-Both scripts accept the same options. Choose another dataset with `--dataset`:
+Both scripts accept the same options. Use `--mode full` to train for one epoch:
 
 ```bash
 uv run modal run --detach src/decision_model/liquid_d1_2b_image_finetune.py \
-  --dataset chrislevy/image-segment-decisions
+  --mode full
 ```
 
-Use `--mode full` to train for one epoch. Optionally supply `--revision <commit>`
+To use another dataset with the same format, pass `--dataset owner/dataset`.
+Optionally supply `--revision <commit>`
 to select a specific dataset version. Each run resolves the requested revision
 (default `main`) to a commit SHA and records it in `training.json`.
 
