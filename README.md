@@ -52,9 +52,9 @@ uv sync
 uv run modal setup
 ```
 
-Training uses your active Modal configuration. Create a Modal Secret named
+Training uses your active Modal configuration. In your Modal workspace, create a Secret named
 `huggingface-secret` with `HF_TOKEN` set to a Hugging Face token that can read the
-datasets. This secret is already configured in the current workspace.
+datasets. The script currently requires this secret for both public and private datasets.
 See [Modal's Secrets guide](https://modal.com/docs/guide/secrets).
 
 The script creates the `liquid-d1-training` Volume if needed and uses it for
@@ -62,14 +62,18 @@ caching datasets, the base model, and training outputs.
 
 ## Run
 
-Run a four-step smoke test with 16 training and 4 validation records:
+Mind2Web is the default dataset. Run a four-step smoke test with 16 training and
+4 validation records:
+
+```bash
+uv run modal run --detach src/decision_model/liquid_d1_image_finetune.py
+```
+
+Choose another dataset with `--dataset`:
 
 ```bash
 uv run modal run --detach src/decision_model/liquid_d1_image_finetune.py \
-  --dataset chrislevy/image-segment-decisions --mode smoke
-
-uv run modal run --detach src/decision_model/liquid_d1_image_finetune.py \
-  --dataset chrislevy/mind2web-decisions --mode smoke
+  --dataset chrislevy/image-segment-decisions
 ```
 
 Use `--mode full` to train for one epoch. Optionally supply `--revision <commit>`

@@ -1,8 +1,8 @@
 """Fine-tune Liquid d1-3B on a normalized Hugging Face image decision dataset.
 
-Run: uv run modal run --detach src/decision_model/liquid_d1_image_finetune.py \
-    --dataset chrislevy/image-segment-decisions --mode smoke
-Use --mode full for one epoch. Requires train and validation splits with
+Run: uv run modal run --detach src/decision_model/liquid_d1_image_finetune.py
+Defaults to Mind2Web and a smoke test; use --dataset to choose another dataset
+and --mode full for one epoch. Requires train and validation splits with
 id, images (List[Image]), state (Json), question (Json), and label (string).
 
 Based on Liquid's decision-model SFT example:
@@ -21,6 +21,7 @@ import modal
 
 VOLUME_NAME = "liquid-d1-training"
 ROOT = Path(f"/mnt/{VOLUME_NAME}")
+DEFAULT_DATASET = "chrislevy/mind2web-decisions"
 REVISION = "051bcc464b01b9f92942b364d9586b0ef5912432"
 app = modal.App("liquid-d1-image-finetune")
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
@@ -107,7 +108,7 @@ def prepare_dataset(dataset, processor, prompt):
     volumes={str(ROOT): volume},
     secrets=[modal.Secret.from_name("huggingface-secret")],
 )
-def train(dataset: str, mode: str = "smoke", revision: str = "main"):
+def train(dataset: str = DEFAULT_DATASET, mode: str = "smoke", revision: str = "main"):
     """Fine-tune, evaluate, and save the adapter and native d1 checkpoint."""
     import torch
     from datasets import load_dataset
@@ -240,7 +241,7 @@ def train(dataset: str, mode: str = "smoke", revision: str = "main"):
 
 
 @app.local_entrypoint()
-def main(dataset: str, mode: str = "smoke", revision: str = "main"):
+def main(dataset: str = DEFAULT_DATASET, mode: str = "smoke", revision: str = "main"):
     call = train.spawn(dataset, mode, revision)
     print(f"Training call: {call.object_id}")
     print(call.get())
