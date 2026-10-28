@@ -1,14 +1,21 @@
 # Image decision model training
 
-Fine-tune [Liquid d1-2B](https://huggingface.co/LiquidAI/d1-2B) on image decisions with one dataset-independent script:
-[`liquid_d1_image_finetune.py`](src/decision_model/liquid_d1_image_finetune.py).
-It loads a Hugging Face dataset, renders Liquid's native decision prompts, and
-uses TRL for image batching and completion-only loss on the answer code plus EOS.
+Fine-tune Liquid's image decision models with a standalone script for each model:
+
+| Model | Architecture | Training script |
+| --- | --- | --- |
+| [d1-2B](https://huggingface.co/LiquidAI/d1-2B) | LFM3 | [`liquid_d1_2b_image_finetune.py`](src/decision_model/liquid_d1_2b_image_finetune.py) |
+| [d1-3B](https://huggingface.co/LiquidAI/d1-3B) | LFM2.5-VL | [`liquid_d1_3b_image_finetune.py`](src/decision_model/liquid_d1_3b_image_finetune.py) |
+
+Both scripts load the same Hugging Face dataset format, render Liquid's native
+decision prompts, and use TRL for image batching and completion-only loss on the
+answer code plus EOS. Each script works independently and supports both datasets.
 
 d1-2B uses LFM3 with bidirectional global attention over each decision prompt. A small
 `SFTTrainer` subclass applies the model's native attention mask while keeping
 the answer hidden from the prompt. LoRA trains the language model, including
-its attention gates; the vision encoder stays frozen.
+its attention gates. d1-3B uses the standard causal `SFTTrainer`. Both keep the
+vision encoder frozen.
 
 ## Datasets
 
@@ -59,25 +66,30 @@ uv run modal setup
 
 Training uses your active Modal configuration. In your Modal workspace, create a Secret named
 `huggingface-secret` with `HF_TOKEN` set to a Hugging Face token that can read the
-datasets. The script currently requires this secret for both public and private datasets.
+datasets. Both scripts require this secret for public and private datasets.
 See [Modal's Secrets guide](https://modal.com/docs/guide/secrets).
 
-The script creates the `liquid-d1-training` Volume if needed and uses it for
-caching datasets, the base model, and training outputs.
+Both scripts create the `liquid-d1-training` Volume if needed and share its
+dataset cache. Base models are cached by revision, and run names include the
+model size to keep training outputs separate.
 
 ## Run
 
-Mind2Web is the default dataset. Run a four-step smoke test with 16 training and
-4 validation records:
+Mind2Web is the default dataset for both scripts. Choose a model and run a
+four-step smoke test with 16 training and 4 validation records:
 
 ```bash
-uv run modal run --detach src/decision_model/liquid_d1_image_finetune.py
+# d1-2B
+uv run modal run --detach src/decision_model/liquid_d1_2b_image_finetune.py
+
+# d1-3B
+uv run modal run --detach src/decision_model/liquid_d1_3b_image_finetune.py
 ```
 
-Choose another dataset with `--dataset`:
+Both scripts accept the same options. Choose another dataset with `--dataset`:
 
 ```bash
-uv run modal run --detach src/decision_model/liquid_d1_image_finetune.py \
+uv run modal run --detach src/decision_model/liquid_d1_2b_image_finetune.py \
   --dataset chrislevy/image-segment-decisions
 ```
 
@@ -86,12 +98,14 @@ to select a specific dataset version. Each run resolves the requested revision
 (default `main`) to a commit SHA and records it in `training.json`.
 
 Each run saves `adapter/`, `merged/`, and `training.json` under
-`liquid-d1-training:/runs/<run_id>/`. The report includes validation loss before
-and after training, training time, and peak GPU memory; this is not test-set accuracy.
+`liquid-d1-training:/runs/<run_id>/`. Both reports include the model and dataset
+revisions and validation loss before and after training; this is not test-set
+accuracy. The 2B report also includes training time and peak GPU memory.
 
 Load a merged checkpoint with `AutoModel.from_pretrained(path, trust_remote_code=True)`
-and call `model.system_one(state, {"decision": question}, media=images)`.
-Use a separate model instance for inference: initializing the native inference
-engine fuses projections that LoRA needs separately during training.
+and call `model.system_one(state, {"decision": question}, media=images)` for d1-2B,
+or `model.system_one(state, {"decision": question}, images=images)` for d1-3B.
+For d1-2B, use a separate model instance for inference: initializing its native
+inference engine fuses projections that LoRA needs separately during training.
 Fine-tuned probabilities need their own calibration; the base model's calibration
 is not copied into the merged checkpoint.

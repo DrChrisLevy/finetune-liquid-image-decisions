@@ -1,19 +1,19 @@
-"""Fine-tune Liquid d1-2B on a normalized Hugging Face image decision dataset.
+"""Fine-tune Liquid d1-3B on a normalized Hugging Face image decision dataset.
 
-Run: uv run modal run --detach src/decision_model/liquid_d1_image_finetune.py
+Run: uv run modal run --detach src/decision_model/liquid_d1_3b_image_finetune.py
 Defaults to Mind2Web and a smoke test; use --dataset to choose another dataset
 and --mode full for one epoch. Requires train and validation splits with
 id, images (List[Image]), state (Json), question (Json), and label (string).
 
-Uses d1-2B's native prompt/media/attention helpers, with Liquid's LFM3 LoRA setup:
-https://huggingface.co/LiquidAI/d1-2B
-https://github.com/Liquid4All/cookbook/blob/main/finetuning/notebooks/lfm3_vl_sft_with_trl.ipynb
+Based on Liquid's decision-model SFT example:
+https://github.com/Liquid4All/cookbook/blob/main/finetuning/notebooks/sft_for_decision_models_with_trl.ipynb
 """
 
 import importlib
 import json
 import random
 import shutil
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,9 +22,9 @@ import modal
 VOLUME_NAME = "liquid-d1-training"
 ROOT = Path(f"/mnt/{VOLUME_NAME}")
 DEFAULT_DATASET = "chrislevy/mind2web-decisions"
-MODEL = "LiquidAI/d1-2B"
-REVISION = "97c57047d5852d77e02dfac211f8768aff77a8b2"
-app = modal.App("liquid-d1-image-finetune")
+MODEL = "LiquidAI/d1-3B"
+REVISION = "051bcc464b01b9f92942b364d9586b0ef5912432"
+app = modal.App("liquid-d1-3b-image-finetune")
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
 image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -43,10 +43,7 @@ image = (
         "flash-linear-attention==0.5.2",
         "einops",
     )
-    .env({
-        "HF_HUB_DISABLE_TELEMETRY": "1",
-        "HF_HUB_CACHE": str(ROOT / "hf-hub"),
-    })
+    .env({"HF_HUB_CACHE": str(ROOT / "hf-hub")})
 )
 
 
@@ -55,8 +52,6 @@ def prepare_dataset(dataset, processor, prompt):
     from datasets import Image, List
 
     tokenizer = processor.tokenizer
-    media = importlib.import_module(f"{prompt.__package__}.media")
-    image_marker = media.template_markup(processor, "image")
 
     def render(row):
         if (
@@ -72,13 +67,21 @@ def prepare_dataset(dataset, processor, prompt):
             "criteria": {name: row["question"]["criteria"][name] for name in names},
         }
         code, _ = dict(zip(names, prompt.aliases(tokenizer, names)))[row["label"]]
+        content = [{"type": "image"} for _ in row["images"]]
+        content.append({"type": "text", "text": "\x00"})
+        template = processor.apply_chat_template(
+            [{"role": "user", "content": content}],
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        head = "<|im_start|>user\n"
+        marker = template[template.index(head) + len(head) : template.index("\x00")]
         text = prompt.render(
             tokenizer,
             row["state"],
             prompt.as_question(question),
             bos=tokenizer.bos_token or "",
-            lead=prompt.default_lead("lfm3_vl", tokenizer),
-            media=image_marker * len(row["images"]),
+            images=marker,
         )
         return {"prompt": text, "completion": code + tokenizer.eos_token}
 
@@ -109,7 +112,7 @@ def train(dataset: str = DEFAULT_DATASET, mode: str = "smoke", revision: str = "
     from datasets import load_dataset
     from huggingface_hub import HfApi, snapshot_download
     from peft import LoraConfig, get_peft_model
-    from transformers import AutoModel, AutoProcessor, set_seed
+    from transformers import AutoModelForImageTextToText, AutoProcessor, set_seed
     from trl import SFTConfig, SFTTrainer
 
     if mode not in {"smoke", "full"}:
@@ -130,19 +133,16 @@ def train(dataset: str = DEFAULT_DATASET, mode: str = "smoke", revision: str = "
             local_dir=str(ROOT / "model" / REVISION),
         )
     )
-    # Load the native d1 class, but don't call system_one on this training instance:
-    # creating its inference engine fuses projections that LoRA needs separately.
-    model = AutoModel.from_pretrained(checkpoint, trust_remote_code=True, dtype=torch.bfloat16)
-    package = type(model).__module__.rsplit(".", 1)[0]
-    prompt = importlib.import_module(f"{package}.prompt")
-    state_attention = importlib.import_module(f"{package}.attention").state_attention
+    sys.path.insert(0, str(checkpoint))
+    prompt = importlib.import_module("prompt")
     processor = AutoProcessor.from_pretrained(checkpoint, trust_remote_code=True)
     processor.tokenizer.padding_side = "right"
-    processor.tokenizer.d1_codes = model.config.d1_codes
-    processor.tokenizer.d1_prompt = getattr(model.config, "d1_prompt", 1)
     train_dataset = prepare_dataset(train_rows, processor, prompt)
     val_dataset = prepare_dataset(val_rows, processor, prompt)
 
+    model = AutoModelForImageTextToText.from_pretrained(
+        checkpoint, dtype=torch.bfloat16
+    )
     model = get_peft_model(
         model,
         LoraConfig(
@@ -155,8 +155,6 @@ def train(dataset: str = DEFAULT_DATASET, mode: str = "smoke", revision: str = "
                 "q_proj",
                 "k_proj",
                 "v_proj",
-                "gate_proj",
-                "o_proj",
                 "out_proj",
                 "in_proj",
                 "w1",
@@ -167,21 +165,10 @@ def train(dataset: str = DEFAULT_DATASET, mode: str = "smoke", revision: str = "
         ),
     ).to("cuda")
     model.config.use_cache = False
-    trainable_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    run_id = f"{mode}-{dataset.split('/')[-1]}-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}"
+    run_id = f"d1-3b-{mode}-{dataset.split('/')[-1]}-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}"
     run_dir = ROOT / "runs" / run_id
     run_dir.mkdir(parents=True)
-    print(f"Training {MODEL}: {run_id}", flush=True)
-
-    class DecisionTrainer(SFTTrainer):
-        def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-            # With one question, d1's set attention reads the whole prompt both ways.
-            # Answers stay causal and invisible to the prompt, preventing label leakage.
-            prompt_lengths = (inputs["labels"] != -100).int().argmax(dim=1)
-            with state_attention(model, prompt_lengths):
-                return super().compute_loss(model, inputs, return_outputs, num_items_in_batch)
-
-    trainer = DecisionTrainer(
+    trainer = SFTTrainer(
         model=model,
         args=SFTConfig(
             output_dir=str(run_dir / "trainer"),
@@ -211,7 +198,7 @@ def train(dataset: str = DEFAULT_DATASET, mode: str = "smoke", revision: str = "
         processing_class=processor,
     )
     before = trainer.evaluate()["eval_loss"]
-    training_result = trainer.train()
+    trainer.train()
     after = trainer.evaluate()["eval_loss"]
     optimizer_steps = trainer.state.global_step
     del trainer
@@ -240,9 +227,6 @@ def train(dataset: str = DEFAULT_DATASET, mode: str = "smoke", revision: str = "
         "model_revision": REVISION,
         "validation_split": "validation",
         "optimizer_steps": optimizer_steps,
-        "trainable_parameters": trainable_parameters,
-        "train_runtime_seconds": training_result.metrics["train_runtime"],
-        "peak_gpu_memory_gib": torch.cuda.max_memory_allocated() / 2**30,
         "train_rows": len(train_rows),
         "validation_rows": len(val_rows),
         "validation_loss_before": before,
