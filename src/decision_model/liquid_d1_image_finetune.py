@@ -1,17 +1,14 @@
-"""Image-aware decision fine-tuning with Liquid d1-3B on Modal.
+"""Fine-tune Liquid d1-3B on a normalized Hugging Face image decision dataset.
 
-Run: uv run modal run --detach src/decision_model/liquid_d1_image_finetune.py --mode smoke
-Use --mode full for the 9,969/997 split and one epoch. This reproduces our
-LoRA experiment, not Liquid's original d1 training. Training and validation
-targets are the original Brand DNA segment assignments, joined by record ID.
+Run: uv run modal run --detach src/decision_model/liquid_d1_image_finetune.py \
+    --dataset chrislevy/image-segment-decisions --mode smoke
+Use --mode full for one epoch. Requires train and validation splits with
+id, images (List[Image]), state (Json), question (Json), and label (string).
 
-Motivation 
-https://x.com/helloiamleonie/status/2110994738811715943?s=20
+Based on Liquid's decision-model SFT example:
 https://github.com/Liquid4All/cookbook/blob/main/finetuning/notebooks/sft_for_decision_models_with_trl.ipynb
 """
 
-import gzip
-import hashlib
 import importlib
 import json
 import random
@@ -44,52 +41,26 @@ image = (
         "flash-linear-attention==0.5.2",
         "einops",
     )
-    .env({"HF_HUB_DISABLE_TELEMETRY": "1"})
+    .env({
+        "HF_HUB_DISABLE_TELEMETRY": "1",
+        "HF_HUB_CACHE": str(ROOT / "hf-hub"),
+    })
 )
 
 
-def source_split(split, dataset_dir=ROOT / "dataset"):
-    """Read a checksum-verified original Brand DNA benchmark split."""
-    source = dataset_dir / "source-benchmark-v2"
-    manifest = json.loads((source / "manifest.json").read_text())
-    data = (source / f"{split}.jsonl.gz").read_bytes()
-    if manifest["label_source"] != "brand_dna_assignment":
-        raise ValueError("Expected Brand DNA ground-truth labels")
-    if hashlib.sha256(data).hexdigest() != manifest["splits"][split]["sha256"]:
-        raise ValueError(f"{split}: source checksum mismatch")
-    rows = [json.loads(line) for line in gzip.decompress(data).splitlines()]
-    if len(rows) != manifest["splits"][split]["records"]:
-        raise ValueError(f"{split}: source record count mismatch")
-    if len({row["id"] for row in rows}) != len(rows):
-        raise ValueError(f"{split}: duplicate source IDs")
-    return rows, manifest
-
-
-def load_brand_dna_split(split, dataset_dir=ROOT / "dataset"):
-    """Reuse prepared inputs, replacing every target with its source assignment."""
-    source, _ = source_split(split, dataset_dir)
-    by_id = {row["id"]: row for row in source}
-    rows = json.loads((dataset_dir / "demo-data-20261023" / f"{split}.json").read_text())
-    if not rows or len({row["id"] for row in rows}) != len(rows):
-        raise ValueError(f"{split}: empty split or duplicate prepared IDs")
-    for row in rows:
-        reference = by_id[row["id"]]  # Missing ground truth must fail, never fall back.
-        if row["state"] != reference["state"] or row["question"] != reference["questions"]["segment"]:
-            raise ValueError(f"{split}: inputs differ from source for {row['id']}")
-        label = reference["expected"]["segment"]
-        if label not in row["question"]["criteria"]:
-            raise ValueError(f"{split}: invalid Brand DNA target for {row['id']}")
-        row["label"] = label
-    return rows
-
-
-def prepare_dataset(rows, processor, prompt, data_dir):
+def prepare_dataset(dataset, processor, prompt):
     """Render d1 decisions; TRL handles image batching and completion-only labels."""
-    from datasets import Dataset, Image, List
+    from datasets import Image, List
 
     tokenizer = processor.tokenizer
-    examples = []
-    for row in rows:
+
+    def render(row):
+        if (
+            not row["images"] or not isinstance(row["state"], dict)
+            or row["question"]["type"] != "choice"
+            or row["label"] not in row["question"]["criteria"]
+        ):
+            raise ValueError(f"Invalid image decision: {row['id']}")
         names = list(row["question"]["criteria"])
         random.Random(f"42:{row['id']}").shuffle(names)
         question = {
@@ -113,14 +84,18 @@ def prepare_dataset(rows, processor, prompt, data_dir):
             bos=tokenizer.bos_token or "",
             images=marker,
         )
-        examples.append(
-            {
-                "prompt": text,
-                "completion": code + tokenizer.eos_token,
-                "images": [str(data_dir / path) for path in row["images"]],
-            }
+        return {"prompt": text, "completion": code + tokenizer.eos_token}
+
+    # Render text without decoding or re-encoding the embedded images.
+    return (
+        dataset.cast_column("images", List(Image(mode="RGB", decode=False)))
+        .map(
+            render,
+            remove_columns=[c for c in dataset.column_names if c != "images"],
+            writer_batch_size=16,
         )
-    return Dataset.from_list(examples).cast_column("images", List(Image(mode="RGB")))
+        .cast_column("images", List(Image(mode="RGB")))
+    )
 
 
 @app.function(
@@ -130,11 +105,13 @@ def prepare_dataset(rows, processor, prompt, data_dir):
     memory=16384,
     timeout=4 * 60 * 60,
     volumes={str(ROOT): volume},
+    secrets=[modal.Secret.from_name("huggingface-secret")],
 )
-def train(mode: str = "smoke"):
+def train(dataset: str, mode: str = "smoke", revision: str = "main"):
     """Fine-tune, evaluate, and save the adapter and native d1 checkpoint."""
     import torch
-    from huggingface_hub import snapshot_download
+    from datasets import load_dataset
+    from huggingface_hub import HfApi, snapshot_download
     from peft import LoraConfig, get_peft_model
     from transformers import AutoModelForImageTextToText, AutoProcessor, set_seed
     from trl import SFTConfig, SFTTrainer
@@ -142,11 +119,14 @@ def train(mode: str = "smoke"):
     if mode not in {"smoke", "full"}:
         raise ValueError("mode must be 'smoke' or 'full'")
     set_seed(42)
-    data_dir = ROOT / "dataset/demo-data-20261023"
-    train_rows = load_brand_dna_split("train")
-    val_rows = load_brand_dna_split("validation")
+    data_revision = HfApi().dataset_info(dataset, revision=revision).sha
+    data = load_dataset(
+        dataset, revision=data_revision, token=True, cache_dir=str(ROOT / "hf-datasets")
+    )
+    train_rows, val_rows = data["train"], data["validation"]
     if mode == "smoke":
-        train_rows, val_rows = train_rows[:16], val_rows[:4]
+        train_rows = train_rows.select(range(min(16, len(train_rows))))
+        val_rows = val_rows.select(range(min(4, len(val_rows))))
     checkpoint = Path(
         snapshot_download(
             "LiquidAI/d1-3B",
@@ -158,9 +138,8 @@ def train(mode: str = "smoke"):
     prompt = importlib.import_module("prompt")
     processor = AutoProcessor.from_pretrained(checkpoint, trust_remote_code=True)
     processor.tokenizer.padding_side = "right"
-    train_dataset = prepare_dataset(train_rows, processor, prompt, data_dir)
-    val_dataset = prepare_dataset(val_rows, processor, prompt, data_dir)
-    print("Example prompt:", train_dataset[0]["prompt"][:1000])
+    train_dataset = prepare_dataset(train_rows, processor, prompt)
+    val_dataset = prepare_dataset(val_rows, processor, prompt)
 
     model = AutoModelForImageTextToText.from_pretrained(
         checkpoint, dtype=torch.bfloat16
@@ -187,7 +166,7 @@ def train(mode: str = "smoke"):
         ),
     ).to("cuda")
     model.config.use_cache = False
-    run_id = f"{mode}-brand-dna-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}"
+    run_id = f"{mode}-{dataset.split('/')[-1]}-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}"
     run_dir = ROOT / "runs" / run_id
     run_dir.mkdir(parents=True)
     trainer = SFTTrainer(
@@ -242,7 +221,11 @@ def train(mode: str = "smoke"):
     report = {
         "run_id": run_id,
         "mode": mode,
-        "label_source": "brand_dna_assignment",
+        "label_source": "dataset.label",
+        "dataset": dataset,
+        "dataset_revision": data_revision,
+        "model_revision": REVISION,
+        "validation_split": "validation",
         "optimizer_steps": optimizer_steps,
         "train_rows": len(train_rows),
         "validation_rows": len(val_rows),
@@ -257,6 +240,7 @@ def train(mode: str = "smoke"):
 
 
 @app.local_entrypoint()
-def main(mode: str = "smoke"):
-    call = train.spawn(mode)
+def main(dataset: str, mode: str = "smoke", revision: str = "main"):
+    call = train.spawn(dataset, mode, revision)
     print(f"Training call: {call.object_id}")
+    print(call.get())
