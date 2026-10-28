@@ -1,9 +1,14 @@
 # Image decision model training
 
-Fine-tune Liquid d1-3B on image decisions with one dataset-independent script:
+Fine-tune [Liquid d1-2B](https://huggingface.co/LiquidAI/d1-2B) on image decisions with one dataset-independent script:
 [`liquid_d1_image_finetune.py`](src/decision_model/liquid_d1_image_finetune.py).
 It loads a Hugging Face dataset, renders Liquid's native decision prompts, and
 uses TRL for image batching and completion-only loss on the answer code plus EOS.
+
+d1-2B uses LFM3 with bidirectional global attention over each decision prompt. A small
+`SFTTrainer` subclass applies the model's native attention mask while keeping
+the answer hidden from the prompt. LoRA trains the language model, including
+its attention gates; the vision encoder stays frozen.
 
 ## Datasets
 
@@ -82,4 +87,11 @@ to select a specific dataset version. Each run resolves the requested revision
 
 Each run saves `adapter/`, `merged/`, and `training.json` under
 `liquid-d1-training:/runs/<run_id>/`. The report includes validation loss before
-and after training; this is not test-set accuracy.
+and after training, training time, and peak GPU memory; this is not test-set accuracy.
+
+Load a merged checkpoint with `AutoModel.from_pretrained(path, trust_remote_code=True)`
+and call `model.system_one(state, {"decision": question}, media=images)`.
+Use a separate model instance for inference: initializing the native inference
+engine fuses projections that LoRA needs separately during training.
+Fine-tuned probabilities need their own calibration; the base model's calibration
+is not copied into the merged checkpoint.
