@@ -1,4 +1,4 @@
-# Fine-tuning Liquid decision models on Modal
+# Fine-tuning Liquid Image Decision Models
 
 ## Motivation
 
