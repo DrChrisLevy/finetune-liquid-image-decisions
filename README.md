@@ -21,9 +21,6 @@ uv sync
 uv run modal setup
 ```
 
-Create a [Modal secret](https://modal.com/docs/guide/secrets) named `huggingface-secret`
-with `HF_TOKEN` set to a Hugging Face read token.
-
 ## Run
 
 Both scripts default to [Mind2Web](https://huggingface.co/datasets/chrislevy/mind2web-decisions).

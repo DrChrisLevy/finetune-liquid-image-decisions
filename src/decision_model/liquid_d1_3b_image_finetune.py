@@ -104,7 +104,6 @@ def prepare_dataset(dataset, processor, prompt):
     memory=16384,
     timeout=4 * 60 * 60,
     volumes={str(ROOT): volume},
-    secrets=[modal.Secret.from_name("huggingface-secret")],
 )
 def train(dataset: str = DEFAULT_DATASET, mode: str = "smoke", revision: str = "main"):
     """Fine-tune, evaluate, and save the adapter and native d1 checkpoint."""
@@ -120,7 +119,7 @@ def train(dataset: str = DEFAULT_DATASET, mode: str = "smoke", revision: str = "
     set_seed(42)
     data_revision = HfApi().dataset_info(dataset, revision=revision).sha
     data = load_dataset(
-        dataset, revision=data_revision, token=True, cache_dir=str(ROOT / "hf-datasets")
+        dataset, revision=data_revision, cache_dir=str(ROOT / "hf-datasets")
     )
     train_rows, val_rows = data["train"], data["validation"]
     if mode == "smoke":
