@@ -9,5 +9,14 @@ wheels/
 # Virtual environments
 .venv
 
+# Local API credentials
+.env
+.env.*
+!.env.example
+
 # Generated experiment results
 /results/
+
+# Keep local experiments out; the web demo is backed up on its own branch.
+/scratch/*
+!/scratch/decision-demo/

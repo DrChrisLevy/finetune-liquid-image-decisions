@@ -1,0 +1,11 @@
+/node_modules/
+/dist/
+/data/
+/checkpoints/
+/diagnostic-3b/
+/references/
+/*.png
+/*.log
+/live-smoke.json
+/tracked-before.json
+/diagnose_3b.py
